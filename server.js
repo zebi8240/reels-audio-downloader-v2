@@ -136,24 +136,34 @@ function metaFrom(info) {
   };
 }
 
-function tryExtract(reelUrl, id, extraArgs) {
-  return new Promise((resolve, reject) => {
+function startExtract(reelUrl, id, extraArgs) {
+  let child = null;
+  let settled = false;
+  const promise = new Promise((resolve, reject) => {
     const outTemplate = path.join(FILES_DIR, `${id}.%(ext)s`);
     const args = [
       '--ffmpeg-location', ffmpegPath,
       '--no-playlist',
-      '--socket-timeout', '30',
-      '--retries', '3',
+      '--no-warnings',
+      '--socket-timeout', '15',
+      '--retries', '2',
+      '--fragment-retries', '2',
+      '-N', '8',
       '--print-json',
     ].concat(extraArgs, ['-o', outTemplate, reelUrl]);
 
-    const child = spawn(YTDLP, args);
+    child = spawn(YTDLP, args);
     let out = '';
     let errOut = '';
+    const finish = (fn) => {
+      if (settled) return;
+      settled = true;
+      fn();
+    };
     child.stdout.on('data', (d) => { out += d.toString(); });
     child.stderr.on('data', (d) => { errOut += d.toString(); });
-    child.on('error', (e) => reject(new Error('spawn: ' + e.message)));
-    child.on('close', (code) => {
+    child.on('error', (e) => finish(() => reject(new Error('spawn: ' + e.message))));
+    child.on('close', (code) => finish(() => {
       const files = fs.readdirSync(FILES_DIR).filter((f) => f.startsWith(id + '.') && AUDIO_EXT.test(f));
       if (code === 0 && files.length > 0) {
         let info = {};
@@ -162,8 +172,14 @@ function tryExtract(reelUrl, id, extraArgs) {
       }
       console.error('[yt-dlp] attempt failed, code', code, errOut.slice(-300));
       reject(new Error('yt-dlp failed with code ' + code));
-    });
+    }));
   });
+  return {
+    promise,
+    stop() {
+      if (child && !settled) child.kill('SIGKILL');
+    },
+  };
 }
 
 function cleanupPartial(id) {
@@ -178,28 +194,27 @@ async function ensureFormats(srcFile, id) {
   const mp3Path = path.join(FILES_DIR, `${id}.mp3`);
   const m4aPath = path.join(FILES_DIR, `${id}.m4a`);
   const probe = await probeFile(srcPath);
+  const jobs = [];
 
   if (ext !== '.m4a' && !fs.existsSync(m4aPath)) {
     const canCopy = ext === '.mp4' || /aac|mp4a|alac/i.test(probe.codec);
     const args = canCopy
       ? ['-y', '-i', srcPath, '-vn', '-c:a', 'copy', m4aPath]
-      : ['-y', '-i', srcPath, '-vn', '-c:a', 'aac', '-b:a', '192k', m4aPath];
-    try {
-      await runFfmpeg(args);
-    } catch (e) {
+      : ['-y', '-i', srcPath, '-vn', '-c:a', 'aac', '-b:a', '160k', m4aPath];
+    jobs.push(runFfmpeg(args).catch((e) => {
       console.error('[m4a]', e.message);
       if (fs.existsSync(m4aPath)) fs.unlink(m4aPath, () => {});
-    }
+    }));
   }
 
   if (ext !== '.mp3' && !fs.existsSync(mp3Path)) {
-    try {
-      await runFfmpeg(['-y', '-i', srcPath, '-vn', '-c:a', 'libmp3lame', '-q:a', '2', mp3Path]);
-    } catch (e) {
+    jobs.push(runFfmpeg(['-y', '-threads', '0', '-i', srcPath, '-vn', '-c:a', 'libmp3lame', '-q:a', '4', mp3Path]).catch((e) => {
       console.error('[mp3]', e.message);
       if (fs.existsSync(mp3Path)) fs.unlink(mp3Path, () => {});
-    }
+    }));
   }
+
+  await Promise.all(jobs);
 
   if (ext !== '.mp3' && ext !== '.m4a' && fs.existsSync(srcPath)) fs.unlink(srcPath, () => {});
 
@@ -324,63 +339,55 @@ async function handleAudio(req, res) {
     return res.status(500).json({ success: false, message: 'Audio engine not installed yet. Try again in a minute.' });
   }
 
-  const blocked = await instagramBlockReason(reelUrl);
-  if (blocked) {
-    return res.status(400).json({ success: false, message: blocked });
-  }
-
   const id = crypto.randomBytes(8).toString('hex');
-  const attempts = [
-    ['-x', '--audio-format', 'm4a', '--audio-quality', '0'],
-    ['--impersonate', 'Chrome-136', '-x', '--audio-format', 'm4a', '--audio-quality', '0'],
-    ['-f', 'bestaudio/best', '-x', '--audio-format', 'mp3', '--audio-quality', '0'],
-  ];
+  const audioFormat = ['-f', 'ba[ext=m4a]/bestaudio[ext=m4a]/bestaudio/best'];
+  const blockTask = instagramBlockReason(reelUrl);
+  const job = startExtract(reelUrl, id, audioFormat);
+  let extracted = null;
 
-  for (let i = 0; i < attempts.length; i++) {
-    try {
-      const { file, info } = await tryExtract(reelUrl, id, attempts[i]);
-      const formats = await ensureFormats(file, id);
-      if (!formats.mp3 && !formats.m4a) throw new Error('Could not encode MP3 or M4A');
-
-      const playName = formats.mp3 || formats.m4a;
-      const probed = await probeFile(path.join(FILES_DIR, playName));
-      const meta = metaFrom(info);
-      [formats.mp3, formats.m4a].filter(Boolean).forEach((name) => {
-        setTimeout(() => fs.unlink(path.join(FILES_DIR, name), () => {}), FILE_TTL_MS);
-      });
-
-      const mp3Url = formats.mp3 ? publicFile(req, formats.mp3) : '';
-      const m4aUrl = formats.m4a ? publicFile(req, formats.m4a) : '';
-      return res.json({
-        success: true,
-        audioUrl: mp3Url || m4aUrl,
-        downloadUrl: mp3Url || m4aUrl,
-        mp3Url,
-        m4aUrl,
-        mp3Size: fileSize(formats.mp3),
-        m4aSize: fileSize(formats.m4a),
-        title: meta.title,
-        author: meta.author,
-        username: meta.username,
-        artist: meta.artist,
-        track: meta.track,
-        originalAudio: meta.originalAudio,
-        thumbnail: meta.thumbnail,
-        caption: meta.caption,
-        duration: probed.duration || info.duration || null,
-        bitrate: probed.bitrate,
-      });
-    } catch (e) {
-      console.error('[audio] attempt', i + 1, 'failed:', e.message);
+  try {
+    const first = await Promise.race([
+      blockTask.then((reason) => ({ kind: 'block', reason })),
+      job.promise.then((result) => ({ kind: 'file', result })),
+    ]);
+    if (first.kind === 'block' && first.reason) {
+      job.stop();
+      job.promise.catch(() => {});
       cleanupPartial(id);
+      return res.status(400).json({ success: false, message: first.reason });
+    }
+    extracted = first.kind === 'file' ? first.result : await job.promise;
+  } catch (e) {
+    job.stop();
+    job.promise.catch(() => {});
+    cleanupPartial(id);
+    console.error('[audio] fast attempt failed:', e.message);
+    const reason = await blockTask;
+    if (reason) return res.status(400).json({ success: false, message: reason });
+    try {
+      extracted = await startExtract(reelUrl, id, ['--impersonate', 'Chrome-136'].concat(audioFormat)).promise;
+    } catch (e2) {
+      cleanupPartial(id);
+      console.error('[audio] impersonate attempt failed:', e2.message);
+      return res.status(500).json({
+        success: false,
+        message: 'Could not extract audio from this link. It may be private, removed, age-limited, or Instagram is busy right now. Please try another public reel.',
+      });
     }
   }
 
-  const reason = await instagramBlockReason(reelUrl);
-  return res.status(500).json({
-    success: false,
-    message: reason || 'Could not extract audio from this link. It may be private, removed, age-limited, or Instagram is busy right now. Please try another public reel.',
-  });
+  try {
+    const formats = await ensureFormats(extracted.file, id);
+    if (!formats.mp3 && !formats.m4a) throw new Error('Could not encode MP3 or M4A');
+    const playName = formats.mp3 || formats.m4a;
+    const probed = await probeFile(path.join(FILES_DIR, playName));
+    const meta = metaFrom(extracted.info);
+    return sendReady(req, res, id, formats, meta, probed.duration || extracted.info.duration, probed.bitrate);
+  } catch (e) {
+    cleanupPartial(id);
+    console.error('[audio] convert failed:', e.message);
+    return res.status(500).json({ success: false, message: 'Could not convert this reel audio.' });
+  }
 }
 function sendReady(req, res, id, formats, meta, duration, bitrate) {
   const mp3Url = formats.mp3 ? publicFile(req, formats.mp3) : '';
