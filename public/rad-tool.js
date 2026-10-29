@@ -41,6 +41,43 @@
     if (!input || !go || !audio) return;
 
     function show(el, on) { if (el) el.hidden = !on; }
+    function setDownload(btn, url, filename) {
+      if (!btn) return;
+      btn.dataset.url = url || '';
+      btn.dataset.name = filename;
+      btn.hidden = !url;
+    }
+    async function saveFile(btn) {
+      var url = btn.dataset.url;
+      var filename = btn.dataset.name || 'reel-audio';
+      if (!url || btn.dataset.busy === '1') return;
+      btn.dataset.busy = '1';
+      var label = btn.querySelector('.rad-dl-label');
+      var old = label ? label.textContent : '';
+      if (label) label.textContent = 'Downloading...';
+      var fetchUrl = url + (url.indexOf('?') === -1 ? '?' : '&') + 'download=1&filename=' + encodeURIComponent(filename);
+      try {
+        var res = await fetch(fetchUrl);
+        if (!res.ok) throw new Error('download failed');
+        var blob = await res.blob();
+        var objectUrl = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = objectUrl;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(function () { URL.revokeObjectURL(objectUrl); }, 1500);
+      } catch (err) {
+        var frame = document.createElement('iframe');
+        frame.hidden = true;
+        frame.src = fetchUrl;
+        document.body.appendChild(frame);
+        setTimeout(function () { frame.remove(); }, 60000);
+      }
+      if (label) label.textContent = old;
+      btn.dataset.busy = '0';
+    }
     function syncClear() { show(clearBtn, !!input.value.trim()); }
     function showError(message) {
       show(status, false);
@@ -105,20 +142,8 @@
       }
       audio.src = data.mp3Url || data.m4aUrl || data.audioUrl || '';
       audio.load();
-      if (data.mp3Url) {
-        mp3Btn.hidden = false;
-        mp3Btn.href = data.mp3Url;
-        mp3Btn.setAttribute('download', fileBase(data) + '.mp3');
-      } else {
-        mp3Btn.hidden = true;
-      }
-      if (data.m4aUrl) {
-        m4aBtn.hidden = false;
-        m4aBtn.href = data.m4aUrl;
-        m4aBtn.setAttribute('download', fileBase(data) + '.m4a');
-      } else {
-        m4aBtn.hidden = true;
-      }
+      setDownload(mp3Btn, data.mp3Url, fileBase(data) + '.mp3');
+      setDownload(m4aBtn, data.m4aUrl, fileBase(data) + '.m4a');
       show(status, false);
       show(errorBox, false);
       show(result, true);
@@ -187,6 +212,8 @@
         input.focus();
       }
     });
+    mp3Btn.addEventListener('click', function () { saveFile(mp3Btn); });
+    m4aBtn.addEventListener('click', function () { saveFile(m4aBtn); });
     cover.addEventListener('error', function () {
       cover.classList.add('is-missing');
       coverWrap.classList.add('is-empty');

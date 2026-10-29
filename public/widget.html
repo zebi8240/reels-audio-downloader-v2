@@ -44,11 +44,11 @@
             </div>
             <audio class="rad-audio" controls preload="metadata"></audio>
             <div class="rad-dl">
-                <a class="rad-mp3" href="#" download="reel-audio.mp3">
+                <button type="button" class="rad-mp3">
                     <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"></path></svg>
-                    Download MP3
-                </a>
-                <a class="rad-m4a" href="#" download="reel-audio.m4a">M4A (Original)</a>
+                    <span class="rad-dl-label">Download MP3</span>
+                </button>
+                <button type="button" class="rad-m4a"><span class="rad-dl-label">M4A (Original)</span></button>
             </div>
             <div class="rad-foot">
                 <button type="button" class="rad-again">
@@ -60,5 +60,5 @@
         <p class="rad-note">This tool is intended only for downloading audio from Instagram reels you own or have permission to use.</p>
     </div>
 <script>window.radv2Ajax={ajaxUrl:'/api/audio',nonce:'preview'};</script>
-<script src="/rad-tool.js?v=6"></script>
+<script src="/rad-tool.js?v=7"></script>
 </body></html>

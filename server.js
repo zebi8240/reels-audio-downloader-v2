@@ -31,7 +31,17 @@ fs.mkdirSync(FILES_DIR, { recursive: true });
 
 app.use(express.json({ limit: '16kb' }));
 app.use(express.static(path.join(__dirname, 'public')));
-app.use('/files', express.static(FILES_DIR));
+app.use('/files', (req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  if (String(req.query.download || '') === '1') {
+    const raw = String(req.query.filename || path.basename(req.path || 'reel-audio'));
+    const safe = raw.replace(/[^a-zA-Z0-9._ -]/g, '').trim().slice(0, 80) || 'reel-audio';
+    res.setHeader('Content-Disposition', 'attachment; filename="' + safe + '"');
+  }
+  next();
+}, express.static(FILES_DIR));
 
 // ---- simple CORS (taake tool kisi bhi site se call ho sake) ----
 app.use('/api/', (req, res, next) => {
