@@ -252,7 +252,13 @@ function downloadToFile(url, dest, redirectsLeft) {
     let parsed;
     try { parsed = new URL(url); } catch (e) { return reject(new Error('Bad media URL')); }
     const lib = parsed.protocol === 'http:' ? http : https;
-    const req = lib.get(url, { headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 60000 }, (res) => {
+    const req = lib.get(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0',
+        Referer: 'https://www.instagram.com/',
+      },
+      timeout: 60000,
+    }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location && redirectsLeft > 0) {
         res.resume();
         return resolve(downloadToFile(new URL(res.headers.location, url).toString(), dest, redirectsLeft - 1));
@@ -379,28 +385,20 @@ async function embedDetails(reelUrl) {
   };
 }
 
-function sendMediaLink(res, details) {
-  const track = details.track || '';
-  return res.json({
-    success: true,
-    mediaUrl: details.mediaUrl,
-    audioUrl: details.mediaUrl,
-    downloadUrl: '',
-    mp3Url: '',
-    m4aUrl: '',
-    mp3Size: null,
-    m4aSize: null,
-    title: track || 'Original audio',
-    author: '',
-    username: details.username || '',
-    artist: track ? (details.artist || '') : '',
-    track,
-    originalAudio: !track,
-    thumbnail: details.thumbnail || '',
-    caption: plainText(details.caption).slice(0, 180),
-    duration: details.duration || null,
-    bitrate: null,
-  });
+async function convertHosted(req, res, mediaUrl, meta, durationHint) {
+  const id = crypto.randomBytes(8).toString('hex');
+  const ext = /\.m4a(\?|$)/i.test(mediaUrl) ? '.m4a' : '.mp4';
+  const dest = path.join(FILES_DIR, id + ext);
+  try {
+    await downloadToFile(mediaUrl, dest);
+    const formats = await ensureFormats(id + ext, id);
+    if (!formats.mp3 && !formats.m4a) throw new Error('Could not encode MP3 or M4A');
+    const probed = await probeFile(path.join(FILES_DIR, formats.mp3 || formats.m4a));
+    return sendReady(req, res, id, formats, meta, probed.duration || durationHint, probed.bitrate);
+  } catch (e) {
+    cleanupPartial(id);
+    throw e;
+  }
 }
 
 async function handleAudio(req, res) {
@@ -411,7 +409,24 @@ async function handleAudio(req, res) {
 
   try {
     const details = await embedDetails(reelUrl);
-    if (details && details.mediaUrl) return sendMediaLink(res, details);
+    if (details && details.mediaUrl) {
+      try {
+        const track = details.track || '';
+        return await convertHosted(req, res, details.mediaUrl, {
+          title: track || 'Original audio',
+          author: '',
+          username: details.username || '',
+          artist: track ? (details.artist || '') : '',
+          track,
+          originalAudio: !track,
+          thumbnail: details.thumbnail || '',
+          caption: plainText(details.caption).slice(0, 180),
+        }, details.duration);
+      } catch (err) {
+        console.error('[embed-convert]', err.message);
+        return res.status(500).json({ success: false, message: 'Could not convert this reel audio.' });
+      }
+    }
     if (details) {
       return res.status(500).json({
         success: false,
@@ -508,16 +523,9 @@ async function handleFromMedia(req, res) {
   if (!allowedMediaHost(mediaUrl)) {
     return res.status(400).json({ success: false, message: 'That media address cannot be converted.' });
   }
-  const id = crypto.randomBytes(8).toString('hex');
-  const ext = /\.m4a(\?|$)/i.test(mediaUrl) ? '.m4a' : '.mp4';
-  const dest = path.join(FILES_DIR, id + ext);
+  const body = req.body || {};
   try {
-    await downloadToFile(mediaUrl, dest);
-    const formats = await ensureFormats(id + ext, id);
-    if (!formats.mp3 && !formats.m4a) throw new Error('Could not encode MP3 or M4A');
-    const probed = await probeFile(path.join(FILES_DIR, formats.mp3 || formats.m4a));
-    const body = req.body || {};
-    return sendReady(req, res, id, formats, {
+    return await convertHosted(req, res, mediaUrl, {
       title: plainText(body.title) || 'Original audio',
       author: plainText(body.author),
       username: plainText(body.username).replace(/^@/, ''),
@@ -526,9 +534,8 @@ async function handleFromMedia(req, res) {
       originalAudio: !body.track && !body.artist,
       thumbnail: String(body.thumbnail || ''),
       caption: plainText(body.caption).slice(0, 180),
-    }, probed.duration, probed.bitrate);
+    }, null);
   } catch (e) {
-    cleanupPartial(id);
     console.error('[from-media]', e.message);
     return res.status(500).json({ success: false, message: 'Could not convert this reel audio.' });
   }
