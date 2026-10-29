@@ -334,11 +334,115 @@ async function instagramBlockReason(reelUrl) {
   }
 }
 
+function igEscaped(html, key) {
+  const match = html.match(new RegExp(key + '\\\\":\\\\"((?:\\\\.|[^\\\\"])*?)\\\\"'));
+  if (!match) return '';
+  try {
+    let value = JSON.parse('"' + match[1] + '"');
+    if (value.includes('\\u') || value.includes('\\n')) {
+      try { value = JSON.parse('"' + value.replace(/"/g, '\\"') + '"'); } catch (e) { /* keep first pass */ }
+    }
+    return value;
+  } catch (e) {
+    return '';
+  }
+}
+
+function reelCode(reelUrl) {
+  const match = String(reelUrl || '').match(/\/(?:reel|reels|p)\/([A-Za-z0-9_-]+)/);
+  return match ? match[1] : '';
+}
+
+async function embedDetails(reelUrl) {
+  const code = reelCode(reelUrl);
+  if (!code) return null;
+  const res = await fetch('https://www.instagram.com/reel/' + code + '/embed/captioned/', {
+    headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'text/html' },
+    signal: AbortSignal.timeout(8000),
+  });
+  const html = await res.text();
+  const mediaUrl = igEscaped(html, 'video_url');
+  const username = (html.match(/username\\":\\"([A-Za-z0-9._]{1,30})/) || [])[1] || '';
+  const durationMatch = html.match(/video_duration\\":([0-9.]+)/);
+  const track = igEscaped(html, 'song_name');
+  const artist = igEscaped(html, 'artist_name');
+  const original = !/uses_original_audio\\":false/.test(html);
+  return {
+    mediaUrl: allowedMediaHost(mediaUrl) ? mediaUrl : '',
+    username,
+    thumbnail: igEscaped(html, 'display_url'),
+    caption: igEscaped(html, 'text').slice(0, 180),
+    artist: original ? '' : artist,
+    track: original || /original audio/i.test(track) ? '' : track,
+    duration: durationMatch ? Number(durationMatch[1]) : null,
+    originalAudio: original || /original audio/i.test(track),
+  };
+}
+
+function printMediaUrl(reelUrl) {
+  return new Promise((resolve) => {
+    if (!fs.existsSync(YTDLP)) return resolve('');
+    const child = spawn(YTDLP, [
+      '--skip-download', '--no-warnings', '--no-playlist',
+      '--socket-timeout', '8', '--retries', '1',
+      '--impersonate', 'Chrome-136',
+      '-f', 'ba[ext=m4a]/bestaudio/best',
+      '--print', '%(url)s',
+      reelUrl,
+    ]);
+    let out = '';
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      resolve('');
+    }, 7000);
+    child.stdout.on('data', (d) => { out += d.toString(); });
+    child.on('error', () => { clearTimeout(timer); resolve(''); });
+    child.on('close', () => {
+      clearTimeout(timer);
+      const url = out.trim().split('\n').filter(Boolean).pop() || '';
+      resolve(allowedMediaHost(url) ? url : '');
+    });
+  });
+}
+
+function sendMediaLink(res, details) {
+  const track = details.track || '';
+  return res.json({
+    success: true,
+    mediaUrl: details.mediaUrl,
+    audioUrl: details.mediaUrl,
+    downloadUrl: '',
+    mp3Url: '',
+    m4aUrl: '',
+    mp3Size: null,
+    m4aSize: null,
+    title: track || 'Original audio',
+    author: '',
+    username: details.username || '',
+    artist: track ? (details.artist || '') : '',
+    track,
+    originalAudio: !track,
+    thumbnail: details.thumbnail || '',
+    caption: plainText(details.caption).slice(0, 180),
+    duration: details.duration || null,
+    bitrate: null,
+  });
+}
+
 async function handleAudio(req, res) {
   const reelUrl = cleanInstagramUrl(getInputUrl(req));
   if (!isInstagramUrl(reelUrl)) {
     return res.status(400).json({ success: false, message: 'Please provide a valid Instagram URL.' });
   }
+
+  try {
+    const details = await embedDetails(reelUrl);
+    if (details && !details.mediaUrl) details.mediaUrl = await printMediaUrl(reelUrl);
+    if (details && details.mediaUrl) return sendMediaLink(res, details);
+  } catch (e) {
+    console.error('[embed]', e.message);
+  }
+
   if (!fs.existsSync(YTDLP)) {
     return res.status(500).json({ success: false, message: 'Audio engine not installed yet. Try again in a minute.' });
   }
