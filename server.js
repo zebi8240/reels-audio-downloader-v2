@@ -425,12 +425,6 @@ async function handleAudio(req, res) {
         return res.status(500).json({ success: false, message: 'Could not convert this reel audio.' });
       }
     }
-    if (details) {
-      return res.status(500).json({
-        success: false,
-        message: 'Instagram did not include the video file for this reel on its public page. Reels that use someone else\'s song often need the backup downloader.',
-      });
-    }
   } catch (e) {
     console.error('[embed]', e.message);
   }
@@ -442,7 +436,7 @@ async function handleAudio(req, res) {
   const id = crypto.randomBytes(8).toString('hex');
   const audioFormat = ['-f', 'ba[ext=m4a]/bestaudio[ext=m4a]/bestaudio/best'];
   const blockTask = instagramBlockReason(reelUrl);
-  const job = startExtract(reelUrl, id, audioFormat, 8000);
+  const job = startExtract(reelUrl, id, audioFormat, 15000);
   let extracted = null;
 
   try {
