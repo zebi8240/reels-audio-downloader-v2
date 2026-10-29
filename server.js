@@ -383,6 +383,37 @@ async function embedDetails(reelUrl) {
   };
 }
 
+function printMediaUrl(reelUrl) {
+  return new Promise((resolve) => {
+    if (!fs.existsSync(YTDLP)) return resolve('');
+    const child = spawn(YTDLP, [
+      '--skip-download', '--no-warnings', '--no-playlist',
+      '--socket-timeout', '8', '--retries', '1',
+      '-f', 'ba[ext=m4a]/bestaudio/best',
+      '--print', '%(url)s',
+      reelUrl,
+    ]);
+    let out = '';
+    let done = false;
+    const finish = (url) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve(allowedMediaHost(url) ? url : '');
+    };
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      finish('');
+    }, 12000);
+    child.stdout.on('data', (d) => { out += d.toString(); });
+    child.on('error', () => finish(''));
+    child.on('close', () => {
+      const url = out.trim().split('\n').filter(Boolean).pop() || '';
+      finish(url);
+    });
+  });
+}
+
 async function convertHosted(req, res, mediaUrl, meta, durationHint) {
   const id = crypto.randomBytes(8).toString('hex');
   const ext = /\.m4a(\?|$)/i.test(mediaUrl) ? '.m4a' : '.mp4';
@@ -425,7 +456,26 @@ async function handleAudio(req, res) {
         return res.status(500).json({ success: false, message: 'Could not convert this reel audio.' });
       }
     }
-    if (details) {
+    if (details && !details.mediaUrl) {
+      details.mediaUrl = await printMediaUrl(reelUrl);
+      if (details.mediaUrl) {
+        try {
+          const track = details.track || '';
+          return await convertHosted(req, res, details.mediaUrl, {
+            title: track || 'Original audio',
+            author: '',
+            username: details.username || '',
+            artist: track ? (details.artist || '') : '',
+            track,
+            originalAudio: !track,
+            thumbnail: details.thumbnail || '',
+            caption: plainText(details.caption).slice(0, 180),
+          }, details.duration);
+        } catch (err) {
+          console.error('[audio-url]', err.message);
+          return res.status(500).json({ success: false, message: 'Could not convert this reel audio.' });
+        }
+      }
       return res.status(500).json({
         success: false,
         message: 'Instagram did not include the video file for this reel on its public page. Reels that use someone else\'s song often need the backup downloader.',
