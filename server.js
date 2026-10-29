@@ -18,6 +18,8 @@ const { spawn, execFile } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const http = require('http');
+const https = require('https');
 const ffmpegPath = require('ffmpeg-static');
 
 const app = express();
@@ -216,6 +218,56 @@ function publicFile(req, name) {
   return `${req.protocol}://${req.get('host')}/files/${name}`;
 }
 
+function allowedMediaHost(raw) {
+  try {
+    const host = new URL(raw).hostname.toLowerCase();
+    return host === 'cdninstagram.com' || host.endsWith('.cdninstagram.com') || host.endsWith('.fbcdn.net') || host.endsWith('.fbsbx.com');
+  } catch (e) {
+    return false;
+  }
+}
+
+function downloadToFile(url, dest, redirectsLeft) {
+  if (redirectsLeft === undefined) redirectsLeft = 4;
+  return new Promise((resolve, reject) => {
+    let parsed;
+    try { parsed = new URL(url); } catch (e) { return reject(new Error('Bad media URL')); }
+    const lib = parsed.protocol === 'http:' ? http : https;
+    const req = lib.get(url, { headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 60000 }, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location && redirectsLeft > 0) {
+        res.resume();
+        return resolve(downloadToFile(new URL(res.headers.location, url).toString(), dest, redirectsLeft - 1));
+      }
+      if (res.statusCode !== 200) {
+        res.resume();
+        return reject(new Error('Media download failed'));
+      }
+      const file = fs.createWriteStream(dest);
+      let size = 0;
+      let tooBig = false;
+      res.on('data', (chunk) => {
+        size += chunk.length;
+        if (size > 80 * 1024 * 1024 && !tooBig) {
+          tooBig = true;
+          req.destroy();
+        }
+      });
+      res.pipe(file);
+      file.on('finish', () => {
+        file.close(() => {
+          if (tooBig) {
+            fs.unlink(dest, () => {});
+            reject(new Error('Media file is too large'));
+          } else resolve(dest);
+        });
+      });
+      file.on('error', reject);
+    });
+    req.on('error', reject);
+    req.on('timeout', () => req.destroy(new Error('Media download timed out')));
+  });
+}
+
 function cleanInstagramUrl(raw) {
   try {
     const url = new URL(raw);
@@ -330,8 +382,67 @@ async function handleAudio(req, res) {
     message: reason || 'Could not extract audio from this link. It may be private, removed, age-limited, or Instagram is busy right now. Please try another public reel.',
   });
 }
+function sendReady(req, res, id, formats, meta, duration, bitrate) {
+  const mp3Url = formats.mp3 ? publicFile(req, formats.mp3) : '';
+  const m4aUrl = formats.m4a ? publicFile(req, formats.m4a) : '';
+  [formats.mp3, formats.m4a].filter(Boolean).forEach((name) => {
+    setTimeout(() => fs.unlink(path.join(FILES_DIR, name), () => {}), FILE_TTL_MS);
+  });
+  return res.json({
+    success: true,
+    audioUrl: mp3Url || m4aUrl,
+    downloadUrl: mp3Url || m4aUrl,
+    mp3Url,
+    m4aUrl,
+    mp3Size: fileSize(formats.mp3),
+    m4aSize: fileSize(formats.m4a),
+    title: meta.title,
+    author: meta.author,
+    username: meta.username,
+    artist: meta.artist,
+    track: meta.track,
+    originalAudio: meta.originalAudio,
+    thumbnail: meta.thumbnail,
+    caption: meta.caption,
+    duration: duration || null,
+    bitrate: bitrate || null,
+  });
+}
+
+async function handleFromMedia(req, res) {
+  const mediaUrl = String((req.body && req.body.mediaUrl) || '').trim();
+  if (!allowedMediaHost(mediaUrl)) {
+    return res.status(400).json({ success: false, message: 'That media address cannot be converted.' });
+  }
+  const id = crypto.randomBytes(8).toString('hex');
+  const ext = /\.m4a(\?|$)/i.test(mediaUrl) ? '.m4a' : '.mp4';
+  const dest = path.join(FILES_DIR, id + ext);
+  try {
+    await downloadToFile(mediaUrl, dest);
+    const formats = await ensureFormats(id + ext, id);
+    if (!formats.mp3 && !formats.m4a) throw new Error('Could not encode MP3 or M4A');
+    const probed = await probeFile(path.join(FILES_DIR, formats.mp3 || formats.m4a));
+    const body = req.body || {};
+    return sendReady(req, res, id, formats, {
+      title: plainText(body.title) || 'Original audio',
+      author: plainText(body.author),
+      username: plainText(body.username).replace(/^@/, ''),
+      artist: plainText(body.artist),
+      track: plainText(body.track),
+      originalAudio: !body.track && !body.artist,
+      thumbnail: String(body.thumbnail || ''),
+      caption: plainText(body.caption).slice(0, 180),
+    }, probed.duration, probed.bitrate);
+  } catch (e) {
+    cleanupPartial(id);
+    console.error('[from-media]', e.message);
+    return res.status(500).json({ success: false, message: 'Could not convert this reel audio.' });
+  }
+}
+
 app.get('/api/audio', handleAudio);
 app.post('/api/audio', handleAudio);
+app.post('/api/from-media', handleFromMedia);
 
 // ---- background cleanup: 30 min se purani MP3 files delete (har 10 min) ----
 setInterval(() => {
