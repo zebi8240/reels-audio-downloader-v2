@@ -343,15 +343,13 @@ async function instagramBlockReason(reelUrl) {
 function igEscaped(html, key) {
   const match = html.match(new RegExp(key + '\\\\":\\\\"((?:\\\\.|[^\\\\"])*?)\\\\"'));
   if (!match) return '';
-  try {
-    let value = JSON.parse('"' + match[1] + '"');
-    if (value.includes('\\u') || value.includes('\\n')) {
-      try { value = JSON.parse('"' + value.replace(/"/g, '\\"') + '"'); } catch (e) { /* keep first pass */ }
-    }
-    return value;
-  } catch (e) {
-    return '';
+  let value = match[1];
+  for (let i = 0; i < 4; i++) {
+    if (!value.includes('\\')) break;
+    try { value = JSON.parse('"' + value + '"'); }
+    catch (e) { break; }
   }
+  return value;
 }
 
 function reelCode(reelUrl) {
