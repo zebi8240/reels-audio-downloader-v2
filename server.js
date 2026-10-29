@@ -379,32 +379,6 @@ async function embedDetails(reelUrl) {
   };
 }
 
-function printMediaUrl(reelUrl) {
-  return new Promise((resolve) => {
-    if (!fs.existsSync(YTDLP)) return resolve('');
-    const child = spawn(YTDLP, [
-      '--skip-download', '--no-warnings', '--no-playlist',
-      '--socket-timeout', '8', '--retries', '1',
-      '--impersonate', 'Chrome-136',
-      '-f', 'ba[ext=m4a]/bestaudio/best',
-      '--print', '%(url)s',
-      reelUrl,
-    ]);
-    let out = '';
-    const timer = setTimeout(() => {
-      child.kill('SIGKILL');
-      resolve('');
-    }, 7000);
-    child.stdout.on('data', (d) => { out += d.toString(); });
-    child.on('error', () => { clearTimeout(timer); resolve(''); });
-    child.on('close', () => {
-      clearTimeout(timer);
-      const url = out.trim().split('\n').filter(Boolean).pop() || '';
-      resolve(allowedMediaHost(url) ? url : '');
-    });
-  });
-}
-
 function sendMediaLink(res, details) {
   const track = details.track || '';
   return res.json({
@@ -437,8 +411,13 @@ async function handleAudio(req, res) {
 
   try {
     const details = await embedDetails(reelUrl);
-    if (details && !details.mediaUrl) details.mediaUrl = await printMediaUrl(reelUrl);
     if (details && details.mediaUrl) return sendMediaLink(res, details);
+    if (details) {
+      return res.status(500).json({
+        success: false,
+        message: 'Instagram did not include the video file for this reel on its public page. Reels that use someone else\'s song often need the backup downloader.',
+      });
+    }
   } catch (e) {
     console.error('[embed]', e.message);
   }
