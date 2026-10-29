@@ -136,7 +136,7 @@ function metaFrom(info) {
   };
 }
 
-function startExtract(reelUrl, id, extraArgs) {
+function startExtract(reelUrl, id, extraArgs, timeoutMs) {
   let child = null;
   let settled = false;
   const promise = new Promise((resolve, reject) => {
@@ -145,19 +145,23 @@ function startExtract(reelUrl, id, extraArgs) {
       '--ffmpeg-location', ffmpegPath,
       '--no-playlist',
       '--no-warnings',
-      '--socket-timeout', '15',
-      '--retries', '2',
-      '--fragment-retries', '2',
+      '--socket-timeout', '8',
+      '--retries', '1',
+      '--fragment-retries', '1',
       '-N', '8',
       '--print-json',
     ].concat(extraArgs, ['-o', outTemplate, reelUrl]);
 
     child = spawn(YTDLP, args);
+    const timer = setTimeout(() => {
+      if (child && !settled) child.kill('SIGKILL');
+    }, timeoutMs || 8000);
     let out = '';
     let errOut = '';
     const finish = (fn) => {
       if (settled) return;
       settled = true;
+      clearTimeout(timer);
       fn();
     };
     child.stdout.on('data', (d) => { out += d.toString(); });
@@ -342,7 +346,7 @@ async function handleAudio(req, res) {
   const id = crypto.randomBytes(8).toString('hex');
   const audioFormat = ['-f', 'ba[ext=m4a]/bestaudio[ext=m4a]/bestaudio/best'];
   const blockTask = instagramBlockReason(reelUrl);
-  const job = startExtract(reelUrl, id, audioFormat);
+  const job = startExtract(reelUrl, id, audioFormat, 8000);
   let extracted = null;
 
   try {
@@ -365,7 +369,7 @@ async function handleAudio(req, res) {
     const reason = await blockTask;
     if (reason) return res.status(400).json({ success: false, message: reason });
     try {
-      extracted = await startExtract(reelUrl, id, ['--impersonate', 'Chrome-136'].concat(audioFormat)).promise;
+      extracted = await startExtract(reelUrl, id, ['--impersonate', 'Chrome-136'].concat(audioFormat), 7000).promise;
     } catch (e2) {
       cleanupPartial(id);
       console.error('[audio] impersonate attempt failed:', e2.message);
